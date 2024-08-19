@@ -1,6 +1,6 @@
 [package]
 name = "code-search"
-version = "0.0.1"
+version = "0.0.2"
 license = "MIT"
 readme = "README.md"
 edition = "2021"
@@ -9,6 +9,10 @@ homepage = "https://github.com/feint123"
 description = "A command-line code search tool."
 keywords = ["grep", "ast", "search", "command-line"]
 categories = ["command-line-utilities"]
+
+[[bin]]
+name = "code-search"
+path = "src/main.rs"
 
 [dependencies]
 clap = "4.5.15"
