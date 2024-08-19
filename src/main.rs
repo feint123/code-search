@@ -1,21 +1,18 @@
 use clap::{arg, Command};
+use code_search::{find_text_in_file, get_all_symbols, get_symbol_query, recursion_dir};
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
-use lang::{
-    CQuery, CppQuery, GoQuery, JavaQuery, JavascriptQuery, PythonQuery, RustQuery, SymbolQuery,
-};
+use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
+
 use prettytable::{
     format::{self},
     row, Table,
 };
-use std::ffi::OsStr;
+use regex::Regex;
 use std::{
-    fs::{self, read_dir, File},
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    fs::{self},
+    path::Path,
+    rc::Rc,
 };
-
-use tree_sitter::{Parser, Query, QueryCursor};
 
 pub mod lang;
 
@@ -25,6 +22,7 @@ struct CommandArgs<'a> {
     search_key: &'a str,
     language: &'a str,
     only_symbol: bool,
+    use_reg: bool,
 }
 /**
 * a code search engine, users can search code clips from different language source files.
@@ -39,6 +37,7 @@ fn main() {
             arg!(-l --language <Language> "使用语言文件扩展名，如 rs、md等"),
             arg!(-s --symbol "只搜索符号，如类名、函数名称等"),
             arg!(-k --key <Key> "关键字").required(true),
+            arg!(-r --reg "启用正则表达式（会减缓搜索速度）"),
         ])
         .get_matches();
 
@@ -60,6 +59,12 @@ fn main() {
     } else {
         args.only_symbol = false;
     }
+
+    if let Some(use_reg) = matches.get_one::<bool>("reg") {
+        args.use_reg = *use_reg;
+    } else {
+        args.use_reg = false;
+    }
     // 扫描目录
     let path = Path::new(args.path);
     let mut pathes = vec![];
@@ -68,18 +73,23 @@ fn main() {
     let format = format::FormatBuilder::new().padding(1, 1).build();
     table.set_format(format);
     table.set_format(format);
-    table.add_row(row!["文件路径".bold(), "行数".bold(), "代码".bold()]);
+    // table.add_row(row!["文件路径".bold(), "代码".bold()]);
     let files = pathes.len();
     let pb = ProgressBar::new(files as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} \n{spinner:.blue} {msg}",
         )
         .unwrap()
         .progress_chars("#>-"),
     );
 
     let mut progress = 1;
+    let mut reg: Option<Rc<Regex>> = None;
+    if args.use_reg {
+        let regex = Regex::new(args.search_key).unwrap();
+        reg = Some(Rc::new(regex));
+    }
     for path in pathes {
         // let path = doc.get_first(full_path_field).unwrap().as_str().unwrap();
         let path_str = path.to_str().unwrap();
@@ -92,12 +102,14 @@ fn main() {
             // println!("search: {}", path_str.bright_black());
             if args.only_symbol {
                 let code = fs::read_to_string(Path::new(path_str)).unwrap_or("".to_string());
-                if code.contains(args.search_key) {
+                if (args.use_reg && reg.clone().unwrap().captures(code.as_str()).is_some())
+                    || code.contains(args.search_key)
+                {
                     result =
                         get_all_symbols(&code, args.search_key, get_symbol_query(path_extension));
                 }
             } else {
-                result = find_text_in_file(path_str, args.search_key).expect(
+                result = find_text_in_file(path_str, args.search_key, reg.clone()).expect(
                     format!("Error read file {path_str}")
                         .as_str()
                         .red()
@@ -108,112 +120,29 @@ fn main() {
         }
         progress += 1;
         for (line_number, line) in result {
-            let new_line = line.replace(
-                args.search_key,
-                args.search_key.blue().bold().to_string().as_str(),
-            );
-
+            let mut replace_str = args.search_key;
+            if args.use_reg {
+                let re = reg.clone().unwrap();
+                for cap in re.captures_iter(line.as_str()) {
+                    replace_str = cap.get(0).unwrap().as_str();
+                }
+            }
+            let new_line =
+                line.replace(replace_str, replace_str.blue().bold().to_string().as_str());
             table.add_row(row![
-                path_str.green(),
-                line_number.to_string().normal().bold(),
+                format!(
+                    "{}{}{}",
+                    path_str.green(),
+                    ":".green(),
+                    line_number.to_string().green()
+                ),
+                // line_number.to_string().normal().bold(),
                 new_line.trim()
             ]);
         }
     }
+    pb.with_finish(ProgressFinish::AndClear);
     println!("");
     // 输出结果
     table.printstd();
-}
-fn valid_language_file(extention: &str) -> bool {
-    let valid_extensions = vec![
-        "rs", "js", "ts", "java", "py", "go", "c", "cpp", "md", "txt", "html", "css", "cs", "kt",
-        "swift", "php", "rb", "sh", "sql", "vb", "lua", "hs", "scala", "erl", "m", "r", "h", "hpp",
-    ];
-    return valid_extensions.contains(&extention);
-}
-/*
-* 递归目录
-*/
-fn recursion_dir(root_path: &Path, pathes: &mut Vec<PathBuf>, filter: &str) {
-    if root_path.is_dir() {
-        for entry in read_dir(root_path).expect("Error read Dir") {
-            let dir_entry = entry.expect("Error");
-            let path_buf = dir_entry.path();
-
-            recursion_dir(path_buf.as_path(), pathes, filter);
-        }
-    } else if root_path.is_file() {
-        if root_path.extension().is_some() {
-            let extension = root_path
-                .extension()
-                .unwrap_or(OsStr::new(""))
-                .to_str()
-                .unwrap();
-            if (filter.is_empty() || filter == extension) && valid_language_file(extension) {
-                pathes.push(root_path.to_path_buf());
-            }
-        }
-    }
-}
-
-fn get_symbol_query(extention: &str) -> Box<dyn SymbolQuery> {
-    match extention {
-        "rs" => Box::new(RustQuery),
-        "java" => Box::new(JavaQuery),
-        "py" => Box::new(PythonQuery),
-        "c" => Box::new(CQuery),
-        "cpp" => Box::new(CppQuery),
-        "js" => Box::new(JavascriptQuery),
-        "go" => Box::new(GoQuery),
-        _ => Box::new(RustQuery),
-    }
-}
-/**
-* 获取源码中的所有符号
-*
-*
-*/
-fn get_all_symbols(
-    code: &String,
-    search_key: &str,
-    symbol_query: Box<dyn SymbolQuery>,
-) -> Vec<(usize, String)> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&symbol_query.get_lang())
-        .expect("Error load Rust grammer");
-    let tree = parser.parse(code.as_str(), None).unwrap();
-
-    let mut query_cursor = QueryCursor::new();
-    let mut filed_vec = vec![];
-    for sq in symbol_query.get_queries() {
-        let query = Query::new(
-            &symbol_query.get_lang(),
-            sq.replace(":?", search_key).as_str(),
-        )
-        .unwrap();
-        let captures = query_cursor.captures(&query, tree.root_node(), code.as_bytes());
-        for (m, capture_index) in captures {
-            let capture = m.captures[capture_index];
-            let node = capture.node;
-            let text = node.utf8_text(code.as_bytes()).unwrap();
-            filed_vec.push((node.start_position().row + 1, text.to_string()));
-        }
-    }
-    return filed_vec;
-}
-
-fn find_text_in_file(filename: &str, text: &str) -> Result<Vec<(usize, String)>, std::io::Error> {
-    let file = File::open(filename)?;
-    let reader = BufReader::new(file);
-
-    let mut found_lines = Vec::new();
-    for (line_number, line) in reader.lines().enumerate() {
-        let line = line.unwrap_or("".to_string());
-        if line.contains(text) {
-            found_lines.push((line_number + 1, line));
-        }
-    }
-
-    Ok(found_lines)
 }
