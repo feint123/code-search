@@ -1,17 +1,104 @@
+use colored::Colorize;
+use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use lang::{
     CQuery, CppQuery, GoQuery, JavaQuery, JavascriptQuery, PythonQuery, RustQuery, SymbolQuery,
 };
 use regex::Regex;
+use rustyline::{
+    hint::{Hint, Hinter},
+    Completer, Context, Helper, Highlighter, Validator,
+};
 use std::{
+    collections::HashSet,
     ffi::OsStr,
-    fs::{read_dir, File},
+    fs::{self, read_dir, File},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
 };
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 pub mod lang;
+
+#[derive(Completer, Helper, Highlighter, Validator)]
+pub struct CodeHinter {
+    pub hints: HashSet<CommandHint>,
+}
+
+#[derive(Hash, Debug, PartialEq, Eq)]
+pub struct CommandHint {
+    display: String,
+    complete_up_to: usize,
+}
+
+impl Hint for CommandHint {
+    fn completion(&self) -> Option<&str> {
+        if self.complete_up_to > 0 {
+            Some(&self.display[..self.to_owned().complete_up_to])
+        } else {
+            None
+        }
+    }
+
+    fn display(&self) -> &str {
+        &self.display
+    }
+}
+
+impl CommandHint {
+    fn new(text: &str, complete_up_to: &str) -> Self {
+        assert!(text.starts_with(complete_up_to));
+        Self {
+            display: text.into(),
+            complete_up_to: complete_up_to.len(),
+        }
+    }
+
+    fn suffix(&self, strip_chars: usize) -> Self {
+        Self {
+            display: self.display[strip_chars..].to_owned(),
+            complete_up_to: self.complete_up_to.saturating_sub(strip_chars),
+        }
+    }
+}
+
+impl Hinter for CodeHinter {
+    type Hint = CommandHint;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<CommandHint> {
+        if line.is_empty() || pos < line.len() {
+            return None;
+        }
+
+        self.hints
+            .iter()
+            .filter_map(|hint| {
+                // expect hint after word complete, like redis cli, add condition:
+                // line.ends_with(" ")
+                if hint.display.starts_with(line) {
+                    Some(hint.suffix(pos))
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+}
+
+pub fn diy_hints() -> HashSet<CommandHint> {
+    let mut set = HashSet::new();
+    set.insert(CommandHint::new("help", "help"));
+    set.insert(CommandHint::new(
+        format!("outline {}", "代码文件路径".bright_black()).as_str(),
+        "outline ",
+    ));
+    set.insert(CommandHint::new(
+        format!("search {}", "path search_key".bright_black()).as_str(),
+        "search ",
+    ));
+    set.insert(CommandHint::new("quit()", "quit()"));
+    set
+}
 
 fn valid_language_file(extention: &str) -> bool {
     let valid_extensions = vec![
@@ -121,6 +208,35 @@ pub fn get_all_symbols(
     }
     return filed_vec;
 }
+/**
+* 打印大纲
+*/
+pub fn print_outline(code: &String, symbol_query: Box<dyn SymbolQuery>) {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&symbol_query.get_lang())
+        .expect("Error load Rust grammer");
+    let tree = parser.parse(code.as_str(), None).unwrap();
+    let root_node = tree.root_node();
+    recursion_outline(root_node, code, 0, &symbol_query);
+}
+
+pub fn recursion_outline(
+    node: Node,
+    code: &String,
+    indent: usize,
+    symbol_query: &Box<dyn SymbolQuery>,
+) {
+    if symbol_query.is_key_node(&node) {
+        print!("{}", " ".repeat(indent));
+        let output = symbol_query.get_definition(code, &node);
+        println!("{}", output);
+    }
+
+    for child in node.children(&mut node.walk()) {
+        recursion_outline(child, code, indent + 2, symbol_query)
+    }
+}
 
 pub fn find_text_in_file(
     filename: &str,
@@ -143,4 +259,63 @@ pub fn find_text_in_file(
         }
     }
     Ok(found_lines)
+}
+
+pub fn get_absolute_path(path: &Path) -> String {
+    if path.exists() {
+        let absolute_path = fs::canonicalize(path).unwrap();
+        return absolute_path.to_str().unwrap().to_string();
+    } else {
+        return String::new();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CodeIndex {
+    pub path: String,
+    pub line: usize,
+    pub line_code: String,
+}
+
+/**
+* 构建索引
+*/
+pub fn build_index(project_path: &Path) -> Vec<CodeIndex> {
+    let mut index_list = vec![];
+    let mut pathes = vec![];
+    // 获取项目中的文件
+    recursion_dir(project_path, &mut pathes, "");
+    let files = pathes.len();
+    let pb = ProgressBar::new(files as u64);
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} {pos}/{len} [{elapsed_precise}] {msg}")
+            .unwrap(),
+    );
+    let mut progress = 1;
+    if pathes.len() > 0 {
+        for path in pathes {
+            let path_extension = path.extension().unwrap().to_str().unwrap();
+            let path_str = get_absolute_path(&path);
+
+            let code = fs::read_to_string(Path::new(path_str.as_str())).unwrap_or("".to_string());
+            let result = get_all_symbols(&code, ".*", get_symbol_query(path_extension));
+            if result.len() > 0 {
+                result
+                    .iter()
+                    .map(|item| CodeIndex {
+                        path: path_str.to_string(),
+                        line: item.0,
+                        line_code: item.1.clone(),
+                    })
+                    .for_each(|item| {
+                        pb.set_message(item.path.clone());
+                        pb.set_position(progress);
+                        index_list.push(item);
+                    });
+            }
+            progress += 1;
+        }
+    }
+    pb.with_finish(ProgressFinish::AndClear);
+    return index_list;
 }
