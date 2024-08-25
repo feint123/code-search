@@ -1,7 +1,8 @@
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use lang::{
-    CQuery, CppQuery, GoQuery, JavaQuery, JavascriptQuery, PythonQuery, RustQuery, SymbolQuery,
+    CQuery, CSharpQuery, CppQuery, GoQuery, JavaQuery, JavascriptQuery, PythonQuery, RustQuery,
+    SymbolQuery,
 };
 use regex::Regex;
 use rustyline::{
@@ -18,7 +19,7 @@ use std::{
 };
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
-pub mod lang;
+mod lang;
 
 #[derive(Completer, Helper, Highlighter, Validator)]
 pub struct CodeHinter {
@@ -168,6 +169,7 @@ pub fn get_symbol_query(extention: &str) -> Box<dyn SymbolQuery> {
         "java" => Box::new(JavaQuery),
         "py" => Box::new(PythonQuery),
         "c" => Box::new(CQuery),
+        "cs" => Box::new(CSharpQuery),
         "cpp" => Box::new(CppQuery),
         "js" => Box::new(JavascriptQuery),
         "go" => Box::new(GoQuery),
@@ -227,14 +229,16 @@ pub fn recursion_outline(
     indent: usize,
     symbol_query: &Box<dyn SymbolQuery>,
 ) {
+    let mut temp_indent = indent;
     if symbol_query.is_key_node(&node) {
         print!("{}", " ".repeat(indent));
         let output = symbol_query.get_definition(code, &node);
         println!("{}", output);
+        temp_indent += 2;
     }
 
     for child in node.children(&mut node.walk()) {
-        recursion_outline(child, code, indent + 2, symbol_query)
+        recursion_outline(child, code, temp_indent, symbol_query)
     }
 }
 

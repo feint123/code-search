@@ -14,7 +14,7 @@ use regex::Regex;
 use rustyline::{error::ReadlineError, history::FileHistory, Editor};
 use std::{fs, path::Path, rc::Rc};
 
-pub mod lang;
+mod lang;
 
 #[derive(Default)]
 struct CommandArgs<'a> {
@@ -235,6 +235,28 @@ fn do_interactive_mode(args: &CommandArgs) {
                 println!("Error: {:?}", err);
                 break;
             }
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_outline() {
+        let line = "outline /Volumes/T7/Github/code-search/examples/main.cpp";
+        let outline_args: Vec<&str> = line.split(" ").collect();
+        if outline_args.len() == 2 {
+            let outline_path = Path::new(outline_args[1]);
+            if outline_path.exists() && outline_path.extension().is_some() {
+                let path_extension = outline_path.extension().unwrap().to_str().unwrap();
+                let code = fs::read_to_string(outline_path).unwrap();
+                print_outline(&code, get_symbol_query(path_extension));
+            } else {
+                println!("{}", "文件路径不存在".red());
+            }
+        } else {
+            println!("{}", "参数非法".red());
         }
     }
 }
